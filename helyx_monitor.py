@@ -13,6 +13,11 @@ from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from datetime import datetime
 
+try:
+    import winsound
+except ImportError:
+    winsound = None  # Non-Windows fallback — audio alert silently disabled
+
 # ---------------------------------------------------------------------------
 # Constants & Regex
 # ---------------------------------------------------------------------------
@@ -23,11 +28,29 @@ RESIDUAL_PATTERN = re.compile(
 )
 
 STOP_AT_PATTERN = re.compile(r'(stopAt\s+)\w+(\s*;)', re.MULTILINE)
+TIME_PATTERN    = re.compile(r'^Time\s*=\s*(?P<time>[0-9eE+\-\.]+)', re.MULTILINE)
 
-DEFAULT_VARIABLES = ['Ux', 'Uy', 'Uz']
-POLL_INTERVAL_MS = 500
-LOG_TAIL_CHUNK = 8192
+DEFAULT_VARIABLES       = ['Ux', 'Uy', 'Uz']
+POLL_INTERVAL_MS        = 500
+LOG_TAIL_CHUNK          = 8192
 NO_DATA_WARNING_SECONDS = 30
+
+THEME_LIGHT = {
+    "bg":       "#f0f0f0",
+    "fg":       "#000000",
+    "entry_bg": "#ffffff",
+    "green":    "green",
+    "red":      "red",
+    "gray":     "gray",
+}
+THEME_DARK = {
+    "bg":       "#1e1e1e",
+    "fg":       "#e0e0e0",
+    "entry_bg": "#2d2d2d",
+    "green":    "#4ec94e",
+    "red":      "#e05c5c",
+    "gray":     "#888888",
+}
 
 # ---------------------------------------------------------------------------
 # Backend: ResidualMonitor
@@ -38,16 +61,17 @@ class ResidualMonitor:
     controlDict when residuals drop below threshold."""
 
     def __init__(self, case_dir, log_path, threshold, variables, on_update, on_trigger, on_status):
-        self.case_dir = Path(case_dir)
-        self.log_path = Path(log_path)
-        self.threshold = threshold
-        self.variables = list(variables)
-        self.on_update = on_update
-        self.on_trigger = on_trigger
-        self.on_status = on_status
-        self._stop_event = threading.Event()
-        self._latest = {}
-        self._thread = None
+        self.case_dir     = Path(case_dir)
+        self.log_path     = Path(log_path)
+        self.threshold    = threshold
+        self.variables    = list(variables)
+        self.on_update    = on_update
+        self.on_trigger   = on_trigger
+        self.on_status    = on_status
+        self._stop_event  = threading.Event()
+        self._latest      = {}
+        self._current_time = None
+        self._thread      = None
 
     def start(self):
         self._stop_event.clear()
@@ -68,8 +92,8 @@ class ResidualMonitor:
         self.on_status("Monitoring...")
 
         first_data_time = None
-        has_seen_data = False
-        line_buffer = ""
+        has_seen_data   = False
+        line_buffer     = ""
 
         with open(self.log_path, 'rb') as f:
             # Seek to end — we only care about new output
@@ -91,19 +115,25 @@ class ResidualMonitor:
                 # Handle potential file truncation / rotation
                 try:
                     current_pos = f.tell()
-                    file_size = os.path.getsize(self.log_path)
+                    file_size   = os.path.getsize(self.log_path)
                     if current_pos > file_size:
                         f.seek(0)
                         continue
                 except OSError:
                     pass
 
-                text = chunk.decode('utf-8', errors='replace')
+                text        = chunk.decode('utf-8', errors='replace')
                 line_buffer += text
-                lines = line_buffer.split('\n')
-                line_buffer = lines[-1]  # keep incomplete last line
+                lines        = line_buffer.split('\n')
+                line_buffer  = lines[-1]  # keep incomplete last line
 
                 for line in lines[:-1]:
+                    # Parse Time / iteration counter
+                    time_match = TIME_PATTERN.search(line)
+                    if time_match:
+                        self._current_time = time_match.group('time')
+
+                    # Parse residuals
                     match = RESIDUAL_PATTERN.search(line)
                     if match and match.group('var') in self.variables:
                         has_seen_data = True
@@ -115,7 +145,7 @@ class ResidualMonitor:
                             pass
 
                 if self._latest:
-                    self.on_update(dict(self._latest))
+                    self.on_update(dict(self._latest), self._current_time)
 
                 # Check convergence: all monitored variables must be present and below threshold
                 if (len(self._latest) >= len(self.variables)
@@ -135,7 +165,7 @@ class ResidualMonitor:
             return
 
         # Write backup
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp   = datetime.now().strftime('%Y%m%d_%H%M%S')
         backup_path = control_dict.with_name(f'controlDict.bak_{timestamp}')
         try:
             backup_path.write_text(content, encoding='utf-8')
@@ -177,17 +207,21 @@ class App:
         self.root = root
         self.root.title("HELYX Residual Monitor")
         self.root.resizable(False, False)
-        self.monitor = None
+        self.monitor     = None
+        self._theme      = THEME_LIGHT
 
         # --- Variables ---
-        self.case_dir_var = tk.StringVar()
-        self.log_file_var = tk.StringVar()
-        self.threshold_var = tk.StringVar(value="1e-4")
-        self.status_var = tk.StringVar(value="Idle")
-        self.monitor_vars = {}
+        self.case_dir_var    = tk.StringVar()
+        self.log_file_var    = tk.StringVar()
+        self.threshold_var   = tk.StringVar(value="1e-4")
+        self.status_var      = tk.StringVar(value="Idle")
+        self.audio_alert_var = tk.BooleanVar(value=True)
+        self.dark_mode_var   = tk.BooleanVar(value=False)
+        self.monitor_vars    = {}
         for v in DEFAULT_VARIABLES:
             self.monitor_vars[v] = tk.BooleanVar(value=True)
-        self.res_labels = {}
+        self.res_labels  = {}
+        self.time_label  = None
 
         self._build_ui()
 
@@ -219,6 +253,13 @@ class App:
         for i, v in enumerate(DEFAULT_VARIABLES):
             ttk.Checkbutton(cb_frame, text=v, variable=self.monitor_vars[v]).grid(row=0, column=i, padx=(0, 12))
 
+        # Audio alert checkbox
+        ttk.Label(input_frame, text="Audio alert:").grid(row=4, column=0, sticky='w', pady=(4, 0))
+        alert_frame = ttk.Frame(input_frame)
+        alert_frame.grid(row=4, column=1, columnspan=2, sticky='w', padx=(4, 0), pady=(4, 0))
+        ttk.Checkbutton(alert_frame, text="Beep on convergence", variable=self.audio_alert_var).grid(row=0, column=0, padx=(0, 20))
+        ttk.Checkbutton(alert_frame, text="Dark mode", variable=self.dark_mode_var, command=self._apply_theme).grid(row=0, column=1)
+
         input_frame.columnconfigure(1, weight=1)
 
         # --- Start/Stop button ---
@@ -235,12 +276,48 @@ class App:
             lbl.grid(row=0, column=i * 2 + 1)
             self.res_labels[v] = lbl
 
+        # Iteration / time counter
+        ttk.Label(res_frame, text="Iteration / Time:").grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        self.time_label = ttk.Label(res_frame, text="---", width=20, anchor='w')
+        self.time_label.grid(row=1, column=2, columnspan=4, sticky='w', pady=(6, 0))
+
         # --- Status bar ---
         status_frame = ttk.Frame(self.root, padding=(8, 4))
         status_frame.grid(row=3, column=0, sticky='ew')
         ttk.Label(status_frame, text="Status:").pack(side='left')
         self.status_label = ttk.Label(status_frame, textvariable=self.status_var)
         self.status_label.pack(side='left', padx=(4, 0))
+
+        # --- Branding footer ---
+        self.footer_label = ttk.Label(
+            self.root,
+            text="Handford Engineering 2026",
+            font=("Segoe UI", 7),
+            foreground="gray"
+        )
+        self.footer_label.grid(row=4, column=0, pady=(0, 6))
+
+    # --- Theme ---
+
+    def _apply_theme(self):
+        t = THEME_DARK if self.dark_mode_var.get() else THEME_LIGHT
+        self._theme = t
+
+        style = ttk.Style(self.root)
+        style.configure("TFrame",        background=t["bg"])
+        style.configure("TLabel",        background=t["bg"], foreground=t["fg"])
+        style.configure("TLabelframe",   background=t["bg"], foreground=t["fg"])
+        style.configure("TLabelframe.Label", background=t["bg"], foreground=t["fg"])
+        style.configure("TButton",       background=t["bg"], foreground=t["fg"])
+        style.configure("TCheckbutton",  background=t["bg"], foreground=t["fg"])
+        style.configure("TEntry",        fieldbackground=t["entry_bg"], foreground=t["fg"])
+
+        self.root.configure(bg=t["bg"])
+        self.footer_label.configure(foreground=t["gray"])
+
+        # Re-apply residual colours with new theme palette
+        if hasattr(self, '_last_residuals'):
+            self._update_labels(self._last_residuals, getattr(self, '_last_time', None))
 
     # --- Browse handlers ---
 
@@ -253,17 +330,10 @@ class App:
     def _auto_detect_log(self, case_dir):
         p = Path(case_dir)
         candidates = []
-
-        # Look for log.* files (e.g. log.simpleFoam)
         candidates.extend(p.glob('log.*'))
-        # Look for *.log files
         candidates.extend(p.glob('*.log'))
-
-        # Filter to actual files
         candidates = [c for c in candidates if c.is_file()]
-
         if candidates:
-            # Pick the most recently modified
             best = max(candidates, key=lambda f: f.stat().st_mtime)
             self.log_file_var.set(str(best))
 
@@ -275,10 +345,22 @@ class App:
         if f:
             self.log_file_var.set(f)
 
+    # --- Audio alert ---
+
+    def _play_alert(self):
+        if not self.audio_alert_var.get() or winsound is None:
+            return
+        def _beep():
+            for _ in range(3):
+                winsound.Beep(1000, 300)  # 1 kHz tone, 300 ms
+                time.sleep(0.2)            # 200 ms gap within pair
+                winsound.Beep(1000, 300)
+                time.sleep(0.8)            # 800 ms pause between groups
+        threading.Thread(target=_beep, daemon=True).start()
+
     # --- Monitoring control ---
 
     def _start_monitoring(self):
-        # Validate case directory
         case_dir = self.case_dir_var.get().strip()
         if not case_dir or not Path(case_dir).is_dir():
             messagebox.showerror("Error", "Please select a valid case directory.")
@@ -289,13 +371,11 @@ class App:
             messagebox.showerror("Error", "system/controlDict not found in the selected case directory.")
             return
 
-        # Validate log file
         log_file = self.log_file_var.get().strip()
         if not log_file:
             messagebox.showerror("Error", "Please select or specify a log file.")
             return
 
-        # Validate threshold
         try:
             threshold = float(self.threshold_var.get().strip())
             if threshold <= 0:
@@ -304,19 +384,17 @@ class App:
             messagebox.showerror("Error", "Threshold must be a positive number (e.g. 1e-4).")
             return
 
-        # Validate at least one variable
         selected = [v for v, bv in self.monitor_vars.items() if bv.get()]
         if not selected:
             messagebox.showerror("Error", "Select at least one variable to monitor.")
             return
 
-        # Create and start monitor
         self.monitor = ResidualMonitor(
             case_dir=case_dir,
             log_path=log_file,
             threshold=threshold,
             variables=selected,
-            on_update=lambda r: self.root.after(0, self._update_labels, r),
+            on_update=lambda r, t: self.root.after(0, self._update_labels, r, t),
             on_trigger=lambda: self.root.after(0, self._on_trigger),
             on_status=lambda s: self.root.after(0, self._set_status, s),
         )
@@ -334,18 +412,31 @@ class App:
 
     # --- Callbacks ---
 
-    def _update_labels(self, residuals):
-        threshold = float(self.threshold_var.get().strip()) if self.threshold_var.get().strip() else 1e-4
+    def _update_labels(self, residuals, current_time):
+        self._last_residuals = residuals
+        self._last_time      = current_time
+        t = self._theme
+
+        try:
+            threshold = float(self.threshold_var.get().strip())
+        except ValueError:
+            threshold = 1e-4
+
         for v, lbl in self.res_labels.items():
             if v in residuals:
                 val = residuals[v]
-                lbl.config(text=f"{val:.4e}")
-                lbl.config(foreground='green' if val < threshold else 'red')
+                lbl.config(text=f"{val:.4e}",
+                           foreground=t["green"] if val < threshold else t["red"])
             else:
-                lbl.config(text="---")
-                lbl.config(foreground='black')
+                lbl.config(text="---", foreground=t["fg"])
+
+        if self.time_label is not None:
+            self.time_label.config(
+                text=str(current_time) if current_time is not None else "---"
+            )
 
     def _on_trigger(self):
+        self._play_alert()
         self._stop_monitoring()
         self._set_status("Threshold reached — solver stopped")
         messagebox.showinfo(
