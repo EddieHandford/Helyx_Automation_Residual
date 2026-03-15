@@ -1,14 +1,245 @@
 \documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+\usepackage{graphicx}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{enumitem}
 
-\title{Helyx_Automation_Residual}
-\author{ed handford}
+% Code listing style
+\lstset{
+    basicstyle=\ttfamily\small,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    rulecolor=\color{gray!40},
+    breaklines=true,
+    breakatwhitespace=true,
+    showstringspaces=false,
+    numbers=none,
+    xleftmargin=4pt,
+    xrightmargin=4pt,
+    framesep=4pt,
+    framexleftmargin=4pt
+}
+
+\title{Helyx Residual Monitor \\ \large Deployment and User Guide}
+\author{Ed Handford}
 \date{March 2026}
 
 \begin{document}
 
 \maketitle
 
+\tableofcontents
+\newpage
+
+% ============================================================
 \section{Introduction}
+
+The \textbf{Helyx Residual Monitor} is a lightweight GUI tool that monitors a running Helyx (or OpenFOAM) solver in real time. It watches the solver log file for velocity residual values and automatically stops the simulation when all monitored residuals drop below a user-defined convergence threshold.
+
+This removes the need to manually watch residual plots or set overly conservative iteration counts --- the solver runs for exactly as long as it needs to converge, then stops cleanly.
+
+\subsection{Key Features}
+
+\begin{itemize}[nosep]
+    \item Small, standalone GUI --- no complex setup required.
+    \item Monitors velocity residuals (\texttt{Ux}, \texttt{Uy}, \texttt{Uz}) in real time.
+    \item User-configurable convergence threshold (e.g.\ \texttt{1e-4}).
+    \item Automatically patches \texttt{system/controlDict} to stop the solver cleanly.
+    \item Creates a timestamped backup of \texttt{controlDict} before any modification.
+    \item Zero third-party dependencies --- uses only the Python standard library.
+\end{itemize}
+
+% ============================================================
+\section{Prerequisites}
+
+Before deploying the tool, ensure the following are available on the target machine.
+
+\subsection{For Running from Source}
+
+\begin{itemize}[nosep]
+    \item \textbf{Python 3.9 or later} --- download from \url{https://www.python.org/downloads/}.
+    \item During installation on Windows, tick \textbf{``Add Python to PATH''} and ensure the \textbf{tkinter} component is selected (it is included by default).
+    \item No additional packages (\texttt{pip install}) are required.
+\end{itemize}
+
+\subsection{For Building a Standalone Executable}
+
+\begin{itemize}[nosep]
+    \item Everything listed above, plus:
+    \item \textbf{PyInstaller} --- installed via \texttt{pip install pyinstaller}.
+\end{itemize}
+
+% ============================================================
+\section{Deployment}
+
+There are two ways to deploy the tool: running directly from the Python source file, or building a standalone Windows executable.
+
+\subsection{Option A: Run from Source (Recommended for Development)}
+
+\begin{enumerate}[nosep]
+    \item Copy \texttt{helyx\_monitor.py} to any convenient location on your machine.
+    \item Open a terminal (Command Prompt or PowerShell) and navigate to that location.
+    \item Run:
+\begin{lstlisting}
+python helyx_monitor.py
+\end{lstlisting}
+    \item The GUI window will appear and is ready to use.
+\end{enumerate}
+
+\subsection{Option B: Build a Standalone Executable (Recommended for Distribution)}
+
+This produces a single \texttt{.exe} file that can be shared with colleagues who may not have Python installed.
+
+\begin{enumerate}[nosep]
+    \item Open a terminal in the project directory (where \texttt{helyx\_monitor.py} is located).
+    \item Install PyInstaller if not already installed:
+\begin{lstlisting}
+pip install pyinstaller
+\end{lstlisting}
+    \item Run the provided build script:
+\begin{lstlisting}
+build_windows.bat
+\end{lstlisting}
+    Alternatively, run the PyInstaller command directly:
+\begin{lstlisting}
+pyinstaller --onefile --windowed --name "HelyxResidualMonitor" helyx_monitor.py
+\end{lstlisting}
+    \item The executable will be created at:
+\begin{lstlisting}
+dist\HelyxResidualMonitor.exe
+\end{lstlisting}
+    \item Copy this single file to any machine. No installation is needed --- double-click to run.
+\end{enumerate}
+
+\noindent The resulting executable is approximately 10\,MB and includes an embedded Python runtime.
+
+% ============================================================
+\section{Usage}
+
+\subsection{Step-by-Step Workflow}
+
+\begin{enumerate}
+    \item \textbf{Launch the tool.} \\
+    Run \texttt{helyx\_monitor.py} (or double-click the \texttt{.exe}).
+
+    \item \textbf{Select the case directory.} \\
+    Click \emph{Browse} next to ``Case Directory'' and navigate to the root of your Helyx/OpenFOAM case (the folder that contains the \texttt{system/}, \texttt{constant/}, and time directories).
+
+    \item \textbf{Verify the log file.} \\
+    The tool auto-detects the most recent log file in the case directory (e.g.\ \texttt{log.simpleFoam}). If this is incorrect, click \emph{Browse} next to ``Log File'' to select the correct one manually.
+
+    \item \textbf{Set the convergence threshold.} \\
+    Enter the desired residual threshold in the ``Threshold'' field. Common values:
+    \begin{itemize}[nosep]
+        \item \texttt{1e-4} --- loosely converged
+        \item \texttt{1e-5} --- well converged
+        \item \texttt{1e-6} --- tightly converged
+    \end{itemize}
+
+    \item \textbf{Select variables to monitor.} \\
+    Tick or untick the velocity components (\texttt{Ux}, \texttt{Uy}, \texttt{Uz}). All three are selected by default. The solver will only be stopped when \emph{all} selected variables are below the threshold simultaneously.
+
+    \item \textbf{Start the solver in Helyx.} \\
+    Use the Helyx GUI to begin your simulation as normal.
+
+    \item \textbf{Click ``Start Monitoring''.} \\
+    The tool begins tailing the log file. Current residual values are displayed and colour-coded:
+    \begin{itemize}[nosep]
+        \item \textcolor{red}{Red} --- above the threshold.
+        \item \textcolor{green}{Green} --- below the threshold.
+    \end{itemize}
+
+    \item \textbf{Wait for convergence.} \\
+    When all monitored residuals drop below the threshold, the tool will:
+    \begin{enumerate}[nosep]
+        \item Create a backup of \texttt{system/controlDict} (named \texttt{controlDict.bak\_YYYYMMDD\_HHMMSS}).
+        \item Patch \texttt{controlDict} to set \texttt{stopAt writeNow;}.
+        \item Display a notification dialog confirming the solver has been stopped.
+    \end{enumerate}
+    The Helyx solver will finish its current timestep, write the results, and exit cleanly.
+\end{enumerate}
+
+\subsection{Stopping Manually}
+
+Click \emph{Stop Monitoring} at any time to stop the tool without affecting the solver. The solver will continue running --- only the monitoring is halted.
+
+% ============================================================
+\section{How It Works}
+
+This section describes the tool's internal operation for reference.
+
+\subsection{Log File Parsing}
+
+The tool reads new data from the solver log file every 500\,ms. It matches lines against the standard OpenFOAM residual format:
+
+\begin{lstlisting}
+smoothSolver:  Solving for Ux, Initial residual = 0.0023, Final residual = 1.2e-05, No Iterations 3
+\end{lstlisting}
+
+The \textbf{Initial residual} value is extracted. This is the standard convergence metric in CFD --- it represents the residual at the start of each solver iteration, before the linear system is solved. The Final residual (post-solve) is not used, as it can give a misleading impression of convergence.
+
+\subsection{Solver Stop Mechanism}
+
+When the convergence threshold is met, the tool modifies the \texttt{stopAt} entry in \texttt{system/controlDict} to \texttt{writeNow}. OpenFOAM-based solvers (including Helyx) re-read \texttt{controlDict} between timesteps, so this causes the solver to:
+
+\begin{enumerate}[nosep]
+    \item Complete the current timestep.
+    \item Write the solution data to disk.
+    \item Exit cleanly.
+\end{enumerate}
+
+The modification is performed atomically (write to a temporary file, then rename) to avoid corrupting \texttt{controlDict} if the solver reads it mid-write.
+
+\subsection{Backup and Recovery}
+
+Before any modification, a timestamped copy of the original \texttt{controlDict} is saved (e.g.\ \texttt{controlDict.bak\_20260315\_143022}). To restore the original after a run, simply rename the backup file back to \texttt{controlDict}, or change \texttt{stopAt} back to \texttt{endTime} manually.
+
+% ============================================================
+\section{Troubleshooting}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}p{5.5cm}p{8.5cm}@{}}
+\toprule
+\textbf{Symptom} & \textbf{Solution} \\
+\midrule
+``Warning: no residuals detected'' appears after 30 seconds &
+The log file may not contain solver output yet. Ensure the Helyx solver is running and that the correct log file is selected. \\
+\addlinespace
+``system/controlDict not found'' error on start &
+The selected directory is not a valid OpenFOAM case. Browse to the root case folder (the one containing \texttt{system/}, \texttt{constant/}, etc.). \\
+\addlinespace
+``Could not write to controlDict'' error &
+The file may be read-only or locked. Check file permissions in Windows Explorer (right-click $\to$ Properties $\to$ uncheck ``Read-only''). \\
+\addlinespace
+Solver does not stop after threshold is reached &
+Verify that \texttt{system/controlDict} now contains \texttt{stopAt writeNow;}. Some custom solver configurations may not re-read \texttt{controlDict} during a run. \\
+\addlinespace
+GUI does not open (no window appears) &
+Ensure Python was installed with tkinter. Run \texttt{python -c "import tkinter"} in a terminal --- if this produces an error, reinstall Python with the tkinter option selected. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ============================================================
+\section{File Reference}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+\textbf{File} & \textbf{Description} \\
+\midrule
+\texttt{helyx\_monitor.py} & The complete application (GUI and backend logic in a single file). \\
+\texttt{build\_windows.bat} & One-click build script that invokes PyInstaller to produce \texttt{HelyxResidualMonitor.exe}. \\
+\texttt{main.tex} & This documentation (LaTeX source for Overleaf). \\
+\texttt{README.md} & Quick-start guide. \\
+\texttt{.gitignore} & Excludes Python cache and build artifacts from version control. \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \end{document}
